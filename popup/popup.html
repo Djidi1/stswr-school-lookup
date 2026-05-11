@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>STSWR School Lookup</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>School Lookup</h1>
+    <form id="lookup-form">
+      <div class="field">
+        <label for="street-number">Street Number</label>
+        <input type="text" id="street-number" required placeholder="e.g. 100">
+      </div>
+      <div class="field">
+        <label for="street-name">Street Name</label>
+        <input type="text" id="street-name" required placeholder="e.g. Victoria">
+      </div>
+      <div class="field">
+        <label for="municipality">Municipality</label>
+        <input type="text" id="municipality" required placeholder="e.g. Kitchener" value="Kitchener">
+      </div>
+      <button type="submit" id="search-btn">Search</button>
+    </form>
+
+    <div id="loading" class="hidden">
+      <div class="spinner"></div>
+      <p>Looking up schools...</p>
+    </div>
+
+    <div id="error" class="hidden"></div>
+
+    <div id="results" class="hidden">
+      <h2>Results</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>School Name</th>
+            <th>Type</th>
+            <th>District</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
