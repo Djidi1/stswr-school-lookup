@@ -9,6 +9,10 @@
 <body>
   <div class="container">
     <h1>School Lookup</h1>
+    <div class="ratings-bar">
+      <span id="ratings-info">Ratings: not loaded</span>
+      <button type="button" id="refresh-ratings-btn" title="Update school ratings database">&#x21BB; Update</button>
+    </div>
     <form id="lookup-form">
       <div class="field">
         <label for="street-number">Street Number</label>
@@ -40,6 +44,8 @@
             <th>School Name</th>
             <th>Type</th>
             <th>District</th>
+            <th>City</th>
+            <th>Rating</th>
           </tr>
         </thead>
         <tbody id="results-body"></tbody>

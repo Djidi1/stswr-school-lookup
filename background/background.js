@@ -24,6 +24,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(err => sendResponse({ error: err.message }));
     return true;
   }
+
+  if (message.action === 'refreshRatings') {
+    handleRefreshRatings()
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.action === 'getRatingsStatus') {
+    chrome.storage.local.get(['schoolRatings'], (data) => {
+      if (data.schoolRatings) {
+        sendResponse({ lastUpdated: data.schoolRatings.lastUpdated, count: data.schoolRatings.schools.length });
+      } else {
+        sendResponse({ lastUpdated: null, count: 0 });
+      }
+    });
+    return true;
+  }
 });
 
 async function handleLookup(streetNumber, streetName, municipality) {
@@ -35,7 +53,7 @@ async function handleLookup(streetNumber, streetName, municipality) {
   const districtResults = await Promise.all(
     DISTRICTS.map(d => lookupDistrict(streetNumber, resolvedStreet, municipality, d))
   );
-  return districtResults.flat();
+  return enrichWithRatings(districtResults.flat());
 }
 
 async function resolveStreetName(streetName, municipality) {
@@ -180,4 +198,171 @@ function extractHidden(html, name) {
   const regex = new RegExp(`id="${name}"[^>]*value="([^"]*)"`, 'i');
   const match = html.match(regex);
   return match ? match[1] : null;
+}
+
+// --- School Ratings ---
+
+async function handleRefreshRatings() {
+  const tab = await chrome.tabs.create({
+    url: 'https://www.compareschoolrankings.org/',
+    active: false
+  });
+
+  try {
+    await waitForTabLoad(tab.id);
+    const schools = await pollForSchoolData(tab.id, 30000);
+
+    if (!schools || schools.length === 0) {
+      throw new Error('No school data found. The site structure may have changed.');
+    }
+
+    const ratingsData = {
+      lastUpdated: new Date().toISOString().split('T')[0],
+      schools
+    };
+    await chrome.storage.local.set({ schoolRatings: ratingsData });
+    return { success: true, count: schools.length, lastUpdated: ratingsData.lastUpdated };
+  } finally {
+    chrome.tabs.remove(tab.id).catch(() => {});
+  }
+}
+
+function waitForTabLoad(tabId) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error('Page load timed out'));
+    }, 30000);
+
+    function listener(id, changeInfo) {
+      if (id === tabId && changeInfo.status === 'complete') {
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timeout);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function pollForSchoolData(tabId, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: extractSchoolsFromPage
+    });
+
+    const data = results && results[0] && results[0].result;
+    if (data && data.length > 0) return data;
+
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return null;
+}
+
+function extractSchoolsFromPage() {
+  try {
+    const app = document.querySelector('#app');
+    if (!app) return null;
+
+    const vue = app.__vue__ || (app.__vue_app__ && app.__vue_app__._instance && app.__vue_app__._instance.proxy);
+    if (!vue || !vue.$store) return null;
+
+    const schools = vue.$store.state.searchSchoolList;
+    if (!Array.isArray(schools) || schools.length === 0) return null;
+
+    return schools
+      .filter(s => s.id && s.name)
+      .map(s => ({
+        sid: s.id,
+        name: s.name,
+        type: s.level || 'elementary',
+        rating: s.score || null,
+        rank: s.ranking || null,
+        city: s.city || null
+      }));
+  } catch (e) {
+    return null;
+  }
+}
+
+async function enrichWithRatings(results) {
+  const data = await chrome.storage.local.get(['schoolRatings']);
+  if (!data.schoolRatings || !data.schoolRatings.schools) {
+    return results.map(r => ({ ...r, rating: null, rank: null, sid: null, schoolType: null }));
+  }
+
+  const cached = data.schoolRatings.schools;
+  const enriched = [];
+  for (const result of results) {
+    const matches = findRatings(result.name, cached);
+    if (matches.length === 0) {
+      enriched.push({ ...result, rating: null, rank: null, sid: null, schoolType: null, city: null });
+    } else {
+      for (const match of matches) {
+        enriched.push({
+          ...result,
+          rating: match.rating,
+          rank: match.rank,
+          sid: match.sid,
+          schoolType: match.type,
+          city: match.city
+        });
+      }
+    }
+  }
+  return enriched;
+}
+
+function normalizeSchoolName(name) {
+  return name
+    .toLowerCase()
+    .replace(/\b(catholic|public|separate|elementary|secondary|school|collegiate|institute|academy|s\.s\.|ss|p\.s\.|ps|c\.s\.|cs|c\.e\.s\.|ces)\b/g, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findRatings(schoolName, cachedSchools) {
+  const normalized = normalizeSchoolName(schoolName);
+  const words = normalized.split(' ').filter(w => w.length > 2);
+
+  // Exact normalized matches
+  const exact = cachedSchools.filter(s => normalizeSchoolName(s.name) === normalized);
+  if (exact.length > 0) return exact;
+
+  // All significant words from one appear in the other
+  const wordMatch = cachedSchools.filter(s => {
+    const cachedNorm = normalizeSchoolName(s.name);
+    const cachedWords = cachedNorm.split(' ').filter(w => w.length > 2);
+    const shorter = words.length <= cachedWords.length ? words : cachedWords;
+    const longer = words.length > cachedWords.length ? words : cachedWords;
+    return shorter.length > 0 && shorter.every(w => longer.includes(w));
+  });
+  if (wordMatch.length > 0) return wordMatch;
+
+  // Bigram similarity — return all above threshold
+  const similar = [];
+  for (const s of cachedSchools) {
+    const score = bigramSimilarity(normalized, normalizeSchoolName(s.name));
+    if (score > 0.7) {
+      similar.push({ ...s, _score: score });
+    }
+  }
+  similar.sort((a, b) => b._score - a._score);
+  return similar;
+}
+
+function bigramSimilarity(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const bigramsA = new Set();
+  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.slice(i, i + 2));
+  let matches = 0;
+  for (let i = 0; i < b.length - 1; i++) {
+    if (bigramsA.has(b.slice(i, i + 2))) matches++;
+  }
+  return (2 * matches) / (a.length - 1 + b.length - 1);
 }

@@ -3,8 +3,11 @@
   "name": "STSWR School Lookup",
   "version": "1.0.0",
   "description": "Lookup school eligibility on Student Transportation Services of Waterloo Region",
-  "permissions": ["storage"],
-  "host_permissions": ["https://bpweb.stswr.ca/*"],
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": [
+    "https://bpweb.stswr.ca/*",
+    "https://www.compareschoolrankings.org/*"
+  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
