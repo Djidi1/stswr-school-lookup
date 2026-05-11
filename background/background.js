@@ -80,8 +80,9 @@ async function resolveStreetName(streetName, municipality) {
     || items[0];
 }
 
+const GRADE_09_GUID = 'a85cd392-045a-47c3-b121-04d7efdae5ab';
+
 async function lookupDistrict(streetNumber, streetName, municipality, district) {
-  // Step 1: GET the page to extract tokens
   const pageResp = await fetchWithTimeout(TARGET_URL, { credentials: 'include' });
   if (!pageResp.ok) throw new Error('Failed to load eligibility page');
   const html = await pageResp.text();
@@ -94,7 +95,6 @@ async function lookupDistrict(streetNumber, streetName, municipality, district) 
     throw new Error('Could not extract form tokens');
   }
 
-  // Step 2: POST form data
   const formData = new URLSearchParams();
   formData.set('__VIEWSTATE', viewState);
   formData.set('__VIEWSTATEGENERATOR', viewStateGenerator || '');
@@ -126,8 +126,58 @@ async function lookupDistrict(streetNumber, streetName, municipality, district) 
 
   if (!submitResp.ok) throw new Error(`Submit failed for ${district.value}`);
   const resultHtml = await submitResp.text();
+  const elementaryResults = parseResults(resultHtml, district);
 
-  return parseResults(resultHtml, district);
+  // Re-submit with grade 09 to get secondary school
+  const secondaryResults = await lookupSecondary(resultHtml, streetNumber, streetName, municipality, district);
+
+  return [...elementaryResults, ...secondaryResults];
+}
+
+async function lookupSecondary(resultPageHtml, streetNumber, streetName, municipality, district) {
+  const viewState = extractHidden(resultPageHtml, '__VIEWSTATE');
+  const viewStateGenerator = extractHidden(resultPageHtml, '__VIEWSTATEGENERATOR');
+  const eventValidation = extractHidden(resultPageHtml, '__EVENTVALIDATION');
+
+  if (!viewState || !eventValidation) return [];
+
+  const formData = new URLSearchParams();
+  formData.set('__VIEWSTATE', viewState);
+  formData.set('__VIEWSTATEGENERATOR', viewStateGenerator || '');
+  formData.set('__VIEWSTATEENCRYPTED', '');
+  formData.set('__EVENTVALIDATION', eventValidation);
+  formData.set('__EVENTTARGET', '');
+  formData.set('__EVENTARGUMENT', '');
+  formData.set('__LASTFOCUS', '');
+  formData.set('ctl00$hfApplicationRoot', '/');
+  formData.set('ctl00$hfDateFormat', 'yy-mm-dd');
+  formData.set('ctl00$MainContent$eaSchool$txtStreetNumber', streetNumber);
+  formData.set('ctl00$MainContent$eaSchool$meeStreetNumber_ClientState', '');
+  formData.set('ctl00$MainContent$eaSchool$txtStreetName', streetName);
+  formData.set('ctl00$MainContent$eaSchool$ddlCity', municipality.toUpperCase());
+  formData.set('ctl00$MainContent$eaSchool$hfPostCode', '');
+  formData.set('ctl00$MainContent$eaSchool$ddlDistrict', district.value);
+  formData.set('ctl00$MainContent$eaSchool$ddlGrade', GRADE_09_GUID);
+  formData.set('ctl00$_cbDatabase', SCHOOL_YEAR_GUID);
+  formData.set('ctl00$ddlLanguages', 'en-CA');
+  formData.set('ctl00$cbDefaultDatabase', SCHOOL_YEAR_GUID);
+  formData.set('hiddenInputToUpdateATBuffer_CommonToolkitScripts', '1');
+  formData.set('ctl00$MainContent$btnSubmit', 'Submit');
+
+  try {
+    const resp = await fetchWithTimeout(TARGET_URL, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    return parseResults(html, district);
+  } catch (e) {
+    console.warn('Secondary lookup failed:', e.message);
+    return [];
+  }
 }
 
 function parseResults(html, district) {
@@ -137,7 +187,7 @@ function parseResults(html, district) {
     try {
       const cleaned = jsonMatch[1].replace(/\\"/g, '"');
       const parsed = JSON.parse(cleaned);
-      const schools = Array.isArray(parsed[0]) ? parsed[0] : parsed;
+      const schools = Array.isArray(parsed[0]) ? parsed.flat() : parsed;
       return schools.map(s => ({
         name: s.Name ? s.Name.replace(/\s*\(\d{3}-\d{3}-\d{4}\)\s*$/, '').trim() : 'Unknown',
         type: s.GradeSchoolType || inferType(s),
@@ -325,16 +375,27 @@ function normalizeSchoolName(name) {
     .trim();
 }
 
+const WATERLOO_REGION_CITIES = new Set([
+  'waterloo', 'kitchener', 'cambridge', 'elmira', 'ayr', 'baden',
+  'breslau', 'conestogo', 'heidelberg', 'new hamburg', 'st. jacobs',
+  'wellesley', 'woolwich', 'wilmot', 'north dumfries', 'st. clements',
+  'linwood', 'maryhill', 'bloomingdale', 'new dundee', 'petersburg',
+  'mannheim', 'crosshill', 'hawkesville', 'wallenstein', 'west montrose'
+]);
+
+function isWaterlooRegion(city) {
+  return !city || WATERLOO_REGION_CITIES.has(city.toLowerCase().trim());
+}
+
 function findRatings(schoolName, cachedSchools) {
   const normalized = normalizeSchoolName(schoolName);
   const words = normalized.split(' ').filter(w => w.length > 2);
+  const regional = cachedSchools.filter(s => isWaterlooRegion(s.city));
 
-  // Exact normalized matches
-  const exact = cachedSchools.filter(s => normalizeSchoolName(s.name) === normalized);
+  const exact = regional.filter(s => normalizeSchoolName(s.name) === normalized);
   if (exact.length > 0) return exact;
 
-  // All significant words from one appear in the other
-  const wordMatch = cachedSchools.filter(s => {
+  const wordMatch = regional.filter(s => {
     const cachedNorm = normalizeSchoolName(s.name);
     const cachedWords = cachedNorm.split(' ').filter(w => w.length > 2);
     const shorter = words.length <= cachedWords.length ? words : cachedWords;
@@ -343,9 +404,8 @@ function findRatings(schoolName, cachedSchools) {
   });
   if (wordMatch.length > 0) return wordMatch;
 
-  // Bigram similarity — return all above threshold
   const similar = [];
-  for (const s of cachedSchools) {
+  for (const s of regional) {
     const score = bigramSimilarity(normalized, normalizeSchoolName(s.name));
     if (score > 0.7) {
       similar.push({ ...s, _score: score });
