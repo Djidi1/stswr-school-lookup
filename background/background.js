@@ -17,14 +17,14 @@ async function fetchWithTimeout(url, opts = {}, ms = 15000) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'lookup') {
-    handleLookup(message.streetNumber, message.streetName, message.municipality)
-      .then(results => sendResponse({ results }))
-      .catch(err => sendResponse({ error: err.message }));
-    return true;
-  }
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'lookup') return;
+  port.onMessage.addListener((msg) => {
+    handleLookupWithProgress(msg.streetNumber, msg.streetName, msg.municipality, port);
+  });
+});
 
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'refreshRatings') {
     handleRefreshRatings()
       .then(result => sendResponse(result))
@@ -44,16 +44,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function handleLookup(streetNumber, streetName, municipality) {
-  const resolvedStreet = await resolveStreetName(streetName, municipality);
-  if (!resolvedStreet) {
-    throw new Error('Could not resolve street name from autocomplete');
-  }
+async function handleLookupWithProgress(streetNumber, streetName, municipality, port) {
+  try {
+    port.postMessage({ type: 'progress', step: 'Resolving street name...' });
+    const resolvedStreet = await resolveStreetName(streetName, municipality);
+    if (!resolvedStreet) {
+      port.postMessage({ type: 'error', message: 'Could not resolve street name from autocomplete' });
+      return;
+    }
 
-  const districtResults = await Promise.all(
-    DISTRICTS.map(d => lookupDistrict(streetNumber, resolvedStreet, municipality, d))
-  );
-  return enrichWithRatings(districtResults.flat());
+    port.postMessage({ type: 'progress', step: `Street resolved: ${resolvedStreet}` });
+
+    const allResults = [];
+    for (const district of DISTRICTS) {
+      port.postMessage({ type: 'progress', step: `Looking up ${district.name}...` });
+      const results = await lookupDistrict(streetNumber, resolvedStreet, municipality, district);
+      allResults.push(...results);
+    }
+
+    port.postMessage({ type: 'progress', step: 'Matching school ratings...' });
+    const enriched = await enrichWithRatings(allResults);
+
+    port.postMessage({ type: 'done', results: enriched });
+  } catch (err) {
+    port.postMessage({ type: 'error', message: err.message });
+  }
 }
 
 async function resolveStreetName(streetName, municipality) {

@@ -40,6 +40,8 @@ refreshRatingsBtn.addEventListener('click', async () => {
   }
 });
 
+const progressSteps = document.getElementById('progress-steps');
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
 
@@ -53,29 +55,44 @@ form.addEventListener('submit', async (e) => {
 
   showLoading();
 
-  try {
-    const response = await chrome.runtime.sendMessage({
-      action: 'lookup',
-      streetNumber,
-      streetName,
-      municipality
-    });
+  const port = chrome.runtime.connect({ name: 'lookup' });
+  port.postMessage({ streetNumber, streetName, municipality });
 
-    if (response.error) {
-      showError(response.error);
-    } else {
-      showResults(response.results);
+  port.onMessage.addListener((msg) => {
+    if (msg.type === 'progress') {
+      addProgressStep(msg.step);
+    } else if (msg.type === 'done') {
+      showResults(msg.results);
+      port.disconnect();
+    } else if (msg.type === 'error') {
+      showError(msg.message);
+      port.disconnect();
     }
-  } catch (err) {
-    showError(`Extension error: ${err.message}`);
-  }
+  });
+
+  port.onDisconnect.addListener(() => {
+    searchBtn.disabled = false;
+  });
 });
 
 function showLoading() {
   loadingEl.classList.remove('hidden');
   errorEl.classList.add('hidden');
   resultsEl.classList.add('hidden');
+  progressSteps.innerHTML = '';
   searchBtn.disabled = true;
+}
+
+function addProgressStep(text) {
+  const prev = progressSteps.querySelector('li.active');
+  if (prev) {
+    prev.classList.remove('active');
+    prev.classList.add('done');
+  }
+  const li = document.createElement('li');
+  li.textContent = text;
+  li.classList.add('active');
+  progressSteps.appendChild(li);
 }
 
 function showError(message) {
