@@ -57,26 +57,41 @@ async function handleLookup(streetNumber, streetName, municipality) {
 }
 
 async function resolveStreetName(streetName, municipality) {
+  const items = await queryAutocomplete(streetName, municipality);
+  if (items.length > 0) return pickBestMatch(streetName, items);
+
+  // Retry with progressively shorter prefixes (strip trailing words)
+  const words = streetName.trim().split(/\s+/);
+  for (let len = words.length - 1; len >= 1; len--) {
+    const prefix = words.slice(0, len).join(' ');
+    const retry = await queryAutocomplete(prefix, municipality);
+    if (retry.length > 0) return pickBestMatch(streetName, retry);
+  }
+
+  return null;
+}
+
+async function queryAutocomplete(prefix, municipality) {
   const resp = await fetchWithTimeout(`${TARGET_URL}.aspx/GetCompletionList`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({
-      prefixText: streetName,
+      prefixText: prefix,
       count: 100,
       contextKey: municipality.toUpperCase()
     })
   });
-
   if (!resp.ok) throw new Error('Autocomplete request failed');
-
   const data = await resp.json();
-  const items = data.d || [];
-  if (items.length === 0) return null;
+  return data.d || [];
+}
 
+function pickBestMatch(streetName, items) {
   const upper = streetName.toUpperCase();
   return items.find(i => i.toUpperCase() === upper)
     || items.find(i => i.toUpperCase().startsWith(upper))
     || items.find(i => i.toUpperCase().includes(upper))
+    || items.find(i => upper.includes(i.toUpperCase()))
     || items[0];
 }
 
