@@ -110,7 +110,32 @@ function pickBestMatch(streetName, items) {
     || items[0];
 }
 
-const GRADE_09_GUID = 'a85cd392-045a-47c3-b121-04d7efdae5ab';
+const GRADE_09_GUID_FALLBACK = 'a85cd392-045a-47c3-b121-04d7efdae5ab';
+
+function extractGrade09Guid(html) {
+  const selectMatch = html.match(/<select[^>]*name="ctl00\$MainContent\$eaSchool\$ddlGrade"[^>]*>([\s\S]*?)<\/select>/i);
+  if (!selectMatch) return null;
+  const optionMatch = selectMatch[1].match(/<option[^>]*value="([^"]+)"[^>]*>\s*(?:Grade\s*)?0?9\b/i);
+  return optionMatch ? optionMatch[1] : null;
+}
+
+function extractDropdownValues(html, fieldId) {
+  const selectRegex = new RegExp(`id="${fieldId}"[^>]*>([\\s\\S]*?)<\\/select>`, 'i');
+  const selectMatch = html.match(selectRegex);
+  if (!selectMatch) return [];
+  const optionRegex = /<option[^>]*value="([^"]*)"[^>]*>/gi;
+  const values = [];
+  let m;
+  while ((m = optionRegex.exec(selectMatch[1])) !== null) {
+    if (m[1]) values.push(m[1]);
+  }
+  return values;
+}
+
+function matchCityValue(municipality, cityValues) {
+  const upper = municipality.toUpperCase();
+  return cityValues.find(v => v.toUpperCase() === upper) || municipality;
+}
 
 async function lookupDistrict(streetNumber, streetName, municipality, district) {
   const pageResp = await fetchWithTimeout(TARGET_URL, { credentials: 'include' });
@@ -125,26 +150,24 @@ async function lookupDistrict(streetNumber, streetName, municipality, district) 
     throw new Error('Could not extract form tokens');
   }
 
+  const cityValues = extractDropdownValues(html, 'MainContent_eaSchool_ddlCity');
+  const cityValue = matchCityValue(municipality, cityValues);
+
   const formData = new URLSearchParams();
   formData.set('__VIEWSTATE', viewState);
   formData.set('__VIEWSTATEGENERATOR', viewStateGenerator || '');
   formData.set('__VIEWSTATEENCRYPTED', '');
   formData.set('__EVENTVALIDATION', eventValidation);
-  formData.set('__EVENTTARGET', '');
-  formData.set('__EVENTARGUMENT', '');
-  formData.set('__LASTFOCUS', '');
   formData.set('ctl00$hfApplicationRoot', '/');
   formData.set('ctl00$hfDateFormat', 'yy-mm-dd');
   formData.set('ctl00$MainContent$eaSchool$txtStreetNumber', streetNumber);
   formData.set('ctl00$MainContent$eaSchool$meeStreetNumber_ClientState', '');
   formData.set('ctl00$MainContent$eaSchool$txtStreetName', streetName);
-  formData.set('ctl00$MainContent$eaSchool$ddlCity', municipality.toUpperCase());
+  formData.set('ctl00$MainContent$eaSchool$ddlCity', cityValue);
   formData.set('ctl00$MainContent$eaSchool$hfPostCode', '');
   formData.set('ctl00$MainContent$eaSchool$ddlDistrict', district.value);
-  formData.set('ctl00$_cbDatabase', SCHOOL_YEAR_GUID);
   formData.set('ctl00$ddlLanguages', 'en-CA');
   formData.set('ctl00$cbDefaultDatabase', SCHOOL_YEAR_GUID);
-  formData.set('hiddenInputToUpdateATBuffer_CommonToolkitScripts', '1');
   formData.set('ctl00$MainContent$btnSubmit', 'Submit');
 
   const submitResp = await fetchWithTimeout(TARGET_URL, {
@@ -159,42 +182,72 @@ async function lookupDistrict(streetNumber, streetName, municipality, district) 
   const elementaryResults = parseResults(resultHtml, district);
 
   // Re-submit with grade 09 to get secondary school
-  const secondaryResults = await lookupSecondary(resultHtml, streetNumber, streetName, municipality, district);
+  const grade09Guid = extractGrade09Guid(resultHtml) || GRADE_09_GUID_FALLBACK;
+  const secondaryResults = await lookupSecondary(resultHtml, streetNumber, streetName, cityValue, district, grade09Guid);
 
   return [...elementaryResults, ...secondaryResults];
 }
 
-async function lookupSecondary(resultPageHtml, streetNumber, streetName, municipality, district) {
-  const viewState = extractHidden(resultPageHtml, '__VIEWSTATE');
-  const viewStateGenerator = extractHidden(resultPageHtml, '__VIEWSTATEGENERATOR');
-  const eventValidation = extractHidden(resultPageHtml, '__EVENTVALIDATION');
+async function lookupSecondary(resultPageHtml, streetNumber, streetName, cityValue, district, gradeGuid) {
+  // Result page has disabled dropdowns — click "New Search" to get an enabled form with ddlGrade
+  const resetViewState = extractHidden(resultPageHtml, '__VIEWSTATE');
+  const resetViewStateGenerator = extractHidden(resultPageHtml, '__VIEWSTATEGENERATOR');
+  const resetEventValidation = extractHidden(resultPageHtml, '__EVENTVALIDATION');
 
-  if (!viewState || !eventValidation) return [];
+  if (!resetViewState || !resetEventValidation) return [];
 
-  const formData = new URLSearchParams();
-  formData.set('__VIEWSTATE', viewState);
-  formData.set('__VIEWSTATEGENERATOR', viewStateGenerator || '');
-  formData.set('__VIEWSTATEENCRYPTED', '');
-  formData.set('__EVENTVALIDATION', eventValidation);
-  formData.set('__EVENTTARGET', '');
-  formData.set('__EVENTARGUMENT', '');
-  formData.set('__LASTFOCUS', '');
-  formData.set('ctl00$hfApplicationRoot', '/');
-  formData.set('ctl00$hfDateFormat', 'yy-mm-dd');
-  formData.set('ctl00$MainContent$eaSchool$txtStreetNumber', streetNumber);
-  formData.set('ctl00$MainContent$eaSchool$meeStreetNumber_ClientState', '');
-  formData.set('ctl00$MainContent$eaSchool$txtStreetName', streetName);
-  formData.set('ctl00$MainContent$eaSchool$ddlCity', municipality.toUpperCase());
-  formData.set('ctl00$MainContent$eaSchool$hfPostCode', '');
-  formData.set('ctl00$MainContent$eaSchool$ddlDistrict', district.value);
-  formData.set('ctl00$MainContent$eaSchool$ddlGrade', GRADE_09_GUID);
-  formData.set('ctl00$_cbDatabase', SCHOOL_YEAR_GUID);
-  formData.set('ctl00$ddlLanguages', 'en-CA');
-  formData.set('ctl00$cbDefaultDatabase', SCHOOL_YEAR_GUID);
-  formData.set('hiddenInputToUpdateATBuffer_CommonToolkitScripts', '1');
-  formData.set('ctl00$MainContent$btnSubmit', 'Submit');
+  const resetForm = new URLSearchParams();
+  resetForm.set('__VIEWSTATE', resetViewState);
+  resetForm.set('__VIEWSTATEGENERATOR', resetViewStateGenerator || '');
+  resetForm.set('__VIEWSTATEENCRYPTED', '');
+  resetForm.set('__EVENTVALIDATION', resetEventValidation);
+  resetForm.set('ctl00$hfApplicationRoot', '/');
+  resetForm.set('ctl00$hfDateFormat', 'yy-mm-dd');
+  resetForm.set('ctl00$MainContent$eaSchool$txtStreetNumber', streetNumber);
+  resetForm.set('ctl00$MainContent$eaSchool$meeStreetNumber_ClientState', '');
+  resetForm.set('ctl00$MainContent$eaSchool$txtStreetName', streetName);
+  resetForm.set('ctl00$MainContent$eaSchool$hfPostCode', '');
+  resetForm.set('ctl00$ddlLanguages', 'en-CA');
+  resetForm.set('ctl00$cbDefaultDatabase', SCHOOL_YEAR_GUID);
+  resetForm.set('ctl00$MainContent$btnReset', 'New Search');
 
   try {
+    const resetResp = await fetchWithTimeout(TARGET_URL, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: resetForm.toString()
+    });
+    if (!resetResp.ok) return [];
+    const resetHtml = await resetResp.text();
+
+    const viewState = extractHidden(resetHtml, '__VIEWSTATE');
+    const viewStateGenerator = extractHidden(resetHtml, '__VIEWSTATEGENERATOR');
+    const eventValidation = extractHidden(resetHtml, '__EVENTVALIDATION');
+    if (!viewState || !eventValidation) return [];
+
+    const resetCityValues = extractDropdownValues(resetHtml, 'MainContent_eaSchool_ddlCity');
+    const resetCityValue = matchCityValue(cityValue, resetCityValues);
+    const grade = extractGrade09Guid(resetHtml) || gradeGuid;
+
+    const formData = new URLSearchParams();
+    formData.set('__VIEWSTATE', viewState);
+    formData.set('__VIEWSTATEGENERATOR', viewStateGenerator || '');
+    formData.set('__VIEWSTATEENCRYPTED', '');
+    formData.set('__EVENTVALIDATION', eventValidation);
+    formData.set('ctl00$hfApplicationRoot', '/');
+    formData.set('ctl00$hfDateFormat', 'yy-mm-dd');
+    formData.set('ctl00$MainContent$eaSchool$txtStreetNumber', streetNumber);
+    formData.set('ctl00$MainContent$eaSchool$meeStreetNumber_ClientState', '');
+    formData.set('ctl00$MainContent$eaSchool$txtStreetName', streetName);
+    formData.set('ctl00$MainContent$eaSchool$ddlCity', resetCityValue);
+    formData.set('ctl00$MainContent$eaSchool$hfPostCode', '');
+    formData.set('ctl00$MainContent$eaSchool$ddlDistrict', district.value);
+    formData.set('ctl00$MainContent$eaSchool$ddlGrade', grade);
+    formData.set('ctl00$ddlLanguages', 'en-CA');
+    formData.set('ctl00$cbDefaultDatabase', SCHOOL_YEAR_GUID);
+    formData.set('ctl00$MainContent$btnSubmit', 'Submit');
+
     const resp = await fetchWithTimeout(TARGET_URL, {
       method: 'POST',
       credentials: 'include',
